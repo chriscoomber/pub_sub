@@ -1,0 +1,72 @@
+extern crate futures;
+extern crate tokio_core;
+
+// Trait imports
+use futures::{Future, Stream, Sink};
+
+fn main() {
+    // Create the core, which is an event loop, AKA reactor.
+    //
+    // This is used in two ways.
+    // - Handle a future on the event loop (`handle.spawn()` - where `handle` is a handle to
+    //   the core (which is a bit like a reference)).
+    //   - This creates a task out of the future, and instructs the event loop to keep progressing
+    //     the task when it can, without blocking like `future.wait()` would.
+    // - Run the future with the core. This waits until the task is complete, but in the meantime
+    //   the event loop progresses other tasks that it has been instructed to handle.
+    let mut core = tokio_core::reactor::Core::new().expect("Failed to create core");
+
+    // Create a new channel for sending integers across threads. Only allocate space for one message
+    // in the buffer between flushes.
+    let (tx, rx) = futures::sync::mpsc::channel::<i32>(1);
+
+    // Keep track of time, to display in printouts.
+    let now = std::time::Instant::now();
+
+    // Create future that sends values
+    let sender_future = {
+        let mut send_future = futures::finished(tx).boxed();
+
+        let mut data = vec![5, 4, 3, 2, 1];
+
+        while let Some(i) = data.pop() {
+            send_future = send_future.and_then(move |tx| {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                tx.send(i).map(move |tx| {
+                    println!("@{}s - Sent {}", now.elapsed().as_secs(), i);
+                    tx
+                })
+            }).boxed()
+        }
+
+        send_future
+    };
+
+    // Handle future as a task. Error handling must be done explicitly.
+    core.handle().spawn(sender_future.then(|res| match res {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            println!("Sink error: {:?}", e);
+            Err(())
+        }
+    }));
+
+    // ### Either:
+    // Receive the inputs from the stream, then terminate.
+    core.run(rx.for_each(|res| {
+        println!("@{}s - Received {}", now.elapsed().as_secs(), res);
+        Ok(())
+    })).unwrap();
+
+    // ### Or:
+/*
+    // Schedule a receiver to receive inputs from the stream. Here, we do nothing with them.
+    core.handle().spawn(rx.for_each(|res| {
+        println!("Received {}", res);
+        Ok(())
+    }));
+
+    // Run the reactor on an empty future forever - progressing any tasks that it is told to handle.
+    core.run(futures::empty::<(), ()>()).unwrap();
+*/
+}
